@@ -320,7 +320,7 @@ sub build_js {
 	push @$jsf, $ia_js if -f $ia_js;
 	return unless @$jsf;
 	my ($fh, $js) = tempfile("${ia_name}XXXX", DIR => $tmpdir);
-	if(system "cat @$jsf | uglifyjs -o $js"){
+	if(system "uglifyjs @$jsf -o $js"){
 		die "Failed to build js for $ia_name\n";
 	}
 	return $js;
@@ -388,6 +388,14 @@ Path to the metadata.json file (default: share/{ia_type}/meta/metadata.json)
 
 Exclude instant answers from being built, e.g. spice_template. Separate
 multiple instant answers with spaces.
+
+=head1 NON-PERL DEPENDENCIES
+
+Uses handlebars and uglifyjs command-line utilities and expects them
+to be in its path.
+
+	L<handlebars|https://www.npmjs.com/package/handlebars>
+	L<uglify-js|https://www.npmjs.com/package/uglify-js>
 
 =head1 CONTRIBUTING
 
