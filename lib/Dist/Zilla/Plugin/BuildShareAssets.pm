@@ -13,7 +13,6 @@ use List::MoreUtils 'part';
 use POE qw(Wheel::Run Filter::Reference);
 use IO::All;
 use JSON::XS;
-use Data::Printer;
 
 # Open our files in utf8
 use open ':utf8';
@@ -21,7 +20,7 @@ use open ':utf8';
 use strict;
 no warnings 'uninitialized';
 
-has max_concurrent_builds => (
+has concurrent_builds => (
     is => 'ro',
     default => 2 
 );
@@ -44,7 +43,7 @@ has ia_type => (
     trigger => \&_init_metadata_path
 );
 
-# Instant answers we don't want to build
+# Instant answers we don't want to build. Space-separated string
 has exclude => (
     is   => 'ro',
     default => 'spice_template' 
@@ -59,6 +58,9 @@ sub _init_metadata_path {
     if($mp =~ s/{ia_type}/$new/){
         $self->metadata_path($mp);
     }
+
+    # Let's check that it exists now
+    $self->log_fatal(['Metadata path %s does not exists!', $mp]) unless -f $mp;
 }
 
 # The required plugin sub
@@ -108,13 +110,14 @@ sub _start {
         
         # This will give us unique IA directories
         $dirs{$dir} = [$dir, $ia_name];
+
         # Set the global instant answer type
         $s->ia_type($ia_type) unless $found_ia_type++;
     }
-    die 'No instant answer type found from share directory file paths' unless $found_ia_type;
+    $s->log_fatal(['No instant answer type found from share directory file paths']) unless $found_ia_type;
 
     # Divide directories into max_build number of queues
-    my ($max_builds, $i) = ($s->max_concurrent_builds, 0);
+    my ($max_builds, $i) = ($s->concurrent_builds, 0);
     $h->{queues} = [part { $i++ % $max_builds } values %dirs];
 
     $s->log(['Building instant answers for %s', $s->ia_type]);    
@@ -129,12 +132,14 @@ sub _do_builds {
 
     my $s = $h->{self};
 
-    my $tmpdir = tempdir('dzilXXXX', TMPDIR => 1, CLEANUP => 1);
+    # This should remove the entire directory on a clean exit
+    $h->{tmpdir} = eval { tempdir('dzilXXXX', TMPDIR => 1, CLEANUP => 1); }
+        or $s->log_fatal(["Failed to create tmpdir: $@"]);
 
     for my $q (@{$h->{queues}}){    
         my $b = POE::Wheel::Run->new(
             Program      => \&build_ia,
-            ProgramArgs  => [$q, $s->ia_type, $s->id_map, $tmpdir],
+            ProgramArgs  => [$q],
             CloseOnCall  => 1,
             NoSetSid     => 1,
             StdoutEvent  => '_build_result',
@@ -153,13 +158,21 @@ sub _do_builds {
 sub _build_result {
     my ($h, $res) = @_[HEAP, ARG0];
 
-    if($res){
-        my ($tmp, $dist) = @$res;
+    my ($tmp, $dist) = @$res;
+
+    if($dist){
         # build file from tmpfile content
         my $f = Dist::Zilla::File::OnDisk->new(name => $tmp);
         # rename to distro file
         $f->name($dist);
         $h->{self}->add_file($f);
+    }
+    elsif($tmp =~ /FATAL/){
+        $h->{self}->log_fatal([$tmp]);
+    }
+    else{
+        # Shouldn't get here so let's make sure we see the message
+        $h->{self}->log(['Unknown result returned from build process: %s', $tmp]);
     }
 }
 
@@ -198,59 +211,91 @@ sub _default {
 sub load_metadata {
     my $self = shift;
 
-    my $id_map;
+    my $id_map = eval { decode_json(io($self->metadata_path)->slurp); }
+        or $self->log_fatal(["Error reading metadata file: $@"]);
 
-    eval {
-        $id_map = decode_json(io($self->metadata_path)->slurp);
-        1;
-    } or
-    do {
-        $self->log_fatal(["Error reading metadata file: %s", $@]);
-    };
     return $id_map;
 }
 
 # The main sub that the builders run
 sub build_ia {
-    my ($queue, $ia_type, $id_map, $tmpdir) = @_;
+    my $queue = shift;
+
+    my $h = $poe_kernel->get_active_session->get_heap;
+    my $s = $h->{self};
+    my ($id_map, $ia_type, $tmpdir) = ($s->id_map, $s->ia_type, $h->{tmpdir});
 
     #warn 'This builder has ', scalar(@$queue), " instant answers to process\n";
+
+    # single filter for all IAs to message parent
     my $filter = POE::Filter::Reference->new;
+
     #my ($md_build_time, $hb_build_time, $js_build_time);
     for my $ia (@$queue){
         my ($dir, $ia_name) = @$ia;
         warn "\tBuilder $$ processing $ia_name\n";
+
+        # We create multiple temp files using the same pattern
+        my $get_temp_file = sub {
+            my ($fh, $path);
+            eval {
+                ($fh, $path) = tempfile("${ia_name}XXXX", $tmpdir);
+            } or
+            do {
+                fatal_error("Failed to create temp file: $@\n");
+            };
+            return [$fh, $path];
+        };
+
         # (zt) The order that files are added to @js_files for later
         # concatenation *might* make a difference.
         my @js;
     
         #my $t0 = [gettimeofday];
-        if(my $f = build_metadata($ia_name, $id_map, $tmpdir)){
+        if(my $iax = $id_map->{$ia_name}) {
+            my $f = build_metadata($ia_name, $iax, $get_temp_file);
             push @js, $f;
+        }
+        else{
+            # Missing metadata is a warning for now. We probably should skip it but
+            # AutoModuleShareDirs adds an entry in Makefile.PL for every directory
+            # by default
+            warn "WARNING - No metadata found for $ia_name";
         }
         #my $t1 = tv_interval($t0, [gettimeofday]);
         #$md_build_time += $t1;
         #warn "\tMetatadata build for $ia_name took ${t1}s\n";
-    
+
         #$t0 = [gettimeofday];
-        if(my $f = build_handlebars($ia_name, $dir, $tmpdir)){
+        if(my @hbs = <$dir/*.handlebars>) {
+            my $f = build_handlebars($ia_name, \@hbs, $get_temp_file);
             push @js, $f;
         }
         #$t1 = tv_interval($t0, [gettimeofday]);
         #$hb_build_time += $t1;
         #warn "\tHandlebars build for $ia_name took ${t1}s\n";
     
+        my $ia_js = "$dir/$ia_name.js";
+        push @js, $ia_js if -f $ia_js;
+
         #$t0 = [gettimeofday];
-        if(my $js = build_js($dir, $ia_name, \@js, $tmpdir)){
+        if(@js){
+            my $js = build_js($ia_name, \@js, $get_temp_file);
             # We pass the current tmp file name and the distribution
             # file name back to the parent to be added
-            my $result = $filter->put([[$js, "$dir/$ia_name.$ia_type.js"]]);
+            my $result = $filter->put([[$js, "$dir/$ia_name." . $ia_type . '.js']]);
             print STDOUT @$result;
         }
+        else{
+            # For potential subdirectories that don't really represent IAs.
+            warn "No javascript or handlebars found for $ia_name...skipping";
+        }
+
         #$t1 = tv_interval($t0, [gettimeofday]);
         #$js_build_time += $t1;
         #warn "\tFinal javascript build for $ia_name took ${t1}s\n";
     }
+
     #warn "Builder $$ spent its time working on the following:\n", 
     #    "\tmetadata total buildtime: ${md_build_time}s\n",
     #    "\thandlebars total buildtime: ${hb_build_time}s\n",
@@ -258,72 +303,64 @@ sub build_ia {
 }
 
 sub build_metadata {
-    my ($fn, $id_map, $tmpdir) = @_;
+    my ($fn, $iax, $get_temp_file) = @_;
 
     # create a metadata object for the front end
-    # TODO: use pull/3226 
-    my $metatmp;
-    eval {
-        if(my $iax = $id_map->{$fn}) {
-            my $id = $iax->{id};
-            my %ia = (
-                id => $id,
-                name => $iax->{name},
-                attribution => $iax->{attribution},
-                description => $iax->{description},
-                topic => $iax->{topic},
-                url => "https://duck.co/ia/view/$id"
-            );
-            my $metadata = encode_json(\%ia);
-
-            my ($fh, $fname) = tempfile("${fn}XXXX", DIR => $tmpdir);
-            print $fh ";DDH.$fn = DDH.$fn || {};\nDDH.$fn.meta = $metadata;";
-            $metatmp = $fname;
+    my %ia;
+    for my $m (qw(id name attribution description topic)){
+        unless(exists $iax->{$m}){
+            fatal_error("missing value for $m");
         }
-        1;
-    } or
-    do {
-        die "Error building metadata for $fn: $@";
-    };
+        $ia{$m} = $iax->{$m};
+    }
+    $ia{url} = 'https://duck.co/ia/view/' . $ia{id};
+
+    my $metadata = eval{ encode_json(\%ia) } or fatal_error("Failed to encode json: $@");
+    my ($fh, $metatmp) = @{ $get_temp_file->() };
+    print $fh ";DDH.$fn = DDH.$fn || {};\nDDH.$fn.meta = $metadata;";
+
     return $metatmp;
 }
 
 sub build_handlebars {
-    my ($fn, $dir, $tmpdir) = @_;
+    my ($fn, $hbs, $get_temp_file) = @_;
 
     my $hbc;
-    # if there are any handlebars files
-    if (my @hblist = <$dir/*.handlebars>) {
-        # skip zero length handlebars files
-        my @inc_hb;
-        for my $hb (@hblist) {
-            if (-z $hb) {
-                warn "Skipping zero length file $hb";
-                #unlink $hb; # (zt) should we really be deleting what might be stubs?
-            }
-            else{ push @inc_hb, $hb; }
+    # skip zero length handlebars files
+    my @inc_hb;
+    for my $hb (@$hbs) {
+        if (-z $hb) {
+            warn "Skipping zero length file $hb";
+            #unlink $hb; # (zt) should we really be deleting what might be stubs?
         }
-        if(@inc_hb){
-            (undef, $hbc) = tempfile("${fn}XXXX", DIR => $tmpdir);
-            if(system "handlebars -m -n DDH.$fn @inc_hb -f $hbc"){
-                die "Failed to build handlebars for $fn\n";
-            }
+        else{ push @inc_hb, $hb; }
+    }
+    if(@inc_hb){
+        $hbc = $get_temp_file->()->[1];
+        if(system "handlebars -m -n DDH.$fn @inc_hb -f $hbc"){
+            fatal_error("Failed to run handlebars: $?");
         }
+
     }
     return $hbc;
 }
 
 sub build_js {
-    my ($dir, $ia_name, $jsf, $tmpdir) = @_;
+    my ($ia_name, $jsf, $get_temp_file) = @_;
     
-    my $ia_js = "$dir/$ia_name.js";
-    push @$jsf, $ia_js if -f $ia_js;
-    return unless @$jsf;
-    my ($fh, $js) = tempfile("${ia_name}XXXX", DIR => $tmpdir);
+    my $js = $get_temp_file->()->[1];
     if(system "uglifyjs @$jsf -o $js"){
-        die "Failed to build js for $ia_name\n";
+        fatal_error("Failed to build js for $ia_name");
     }
     return $js;
+}
+
+sub fatal_error {
+    my $e = shift;
+
+    my $f = POE::Filter::Reference->new;
+    my $fe = $f->put([["FATAL - $e"]]);
+    print STDOUT @$fe;
 }
 
 __PACKAGE__->meta->make_immutable;
@@ -376,7 +413,7 @@ To activate the plugin, add the following to F<dist.ini>:
 
 =head1 ATTRIBUTES
 
-=head2 max_concurrent_builds
+=head2 concurrent_builds
 
 The number of concurrent builders to spawn (default: 2)
 
