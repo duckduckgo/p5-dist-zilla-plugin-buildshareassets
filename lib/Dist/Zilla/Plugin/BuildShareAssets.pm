@@ -221,6 +221,8 @@ sub load_metadata {
 sub build_ia {
     my $queue = shift;
 
+    # $poe_kernel is available to all children. So we can pull
+	# the heap from it and save having to pass certain globals in.
     my $h = $poe_kernel->get_active_session->get_heap;
     my $s = $h->{self};
     my ($id_map, $ia_type, $tmpdir) = ($s->id_map, $s->ia_type, $h->{tmpdir});
