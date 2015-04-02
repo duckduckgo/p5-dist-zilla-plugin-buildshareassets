@@ -168,7 +168,10 @@ sub _build_result {
         $h->{self}->add_file($f);
     }
     elsif($tmp =~ /FATAL/){
-        $h->{self}->log_fatal([$tmp]);
+		# kill any running children so they can exit "normally"
+		$h->{builders}->{$_}->kill for keys %{$h->{builders}};
+		# this message will be handled in _stop once the children have been reaped
+		$h->{FATAL} = $tmp;
     }
     else{
         # Shouldn't get here so let's make sure we see the message
@@ -195,6 +198,7 @@ sub _build_done {
 sub _stop {
     my $h = $_[HEAP];
 
+    $h->{self}->log_fatal([$h->{FATAL}]) if $h->{FATAL};
     $h->{self}->log_debug(['Total elapsed build time: %ss', tv_interval($h->{t0}, [gettimeofday])]);
 }
 
