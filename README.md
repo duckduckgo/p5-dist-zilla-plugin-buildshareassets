@@ -20,7 +20,7 @@ The plugin can be activated by adding the following to **dist.ini**:
 
 There are few attributes that can be set in dist.ini.
 
-- **max_concurrent_builds**: The number of concurrent builders to spawn (default: 2)
+- **concurrent_builds**: The number of concurrent builders to spawn (default: 2)
 - **metadata_path**: Path to the metadata.json file (default: share/{ia_type}/meta/metadata.json)
 - **exclude**: Exclude instant answers from being built, e.g. spice_template. Separate multiple instant answers with spaces.
 
