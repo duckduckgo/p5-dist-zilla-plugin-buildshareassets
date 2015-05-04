@@ -7,6 +7,7 @@ with 'Dist::Zilla::Role::FileGatherer';
 
 use Dist::Zilla::File::OnDisk;
 
+use DDG::Meta::Data;
 use Time::HiRes qw(tv_interval gettimeofday);
 use File::Temp qw(tempdir tempfile);
 use List::MoreUtils 'part';
@@ -25,22 +26,10 @@ has concurrent_builds => (
     default => 2 
 );
 
-has metadata_path => (
-    is => 'rw',
-    default => 'share/{ia_type}/meta/metadata.json'
-);
-
-has id_map => (
-    is => 'ro',
-    lazy => 1,
-    builder => 'load_metadata'
-);
-
 # The instant answer type we're processing. When set it will also set the
 # metadata_path
 has ia_type => (
     is => 'rw',
-    trigger => \&_init_metadata_path
 );
 
 # Instant answers we don't want to build. Space-separated string
@@ -48,20 +37,6 @@ has exclude => (
     is   => 'ro',
     default => 'spice_template' 
 );
-
-sub _init_metadata_path {
-    my ($self, $new) = @_;
-    
-    my $mp = $self->metadata_path;
-    
-    # If metadata_path was set externally, this will fail
-    if($mp =~ s/{ia_type}/$new/){
-        $self->metadata_path($mp);
-    }
-
-    # Let's check that it exists now
-    $self->log_fatal(['Metadata path %s does not exists!', $mp]) unless -f $mp;
-}
 
 # The required plugin sub
 sub gather_files {
@@ -212,15 +187,6 @@ sub _default {
     $h->{self}->log_debug(["We don't explicitly handle event", $e]);
 }
 
-sub load_metadata {
-    my $self = shift;
-
-    my $id_map = eval { decode_json(io($self->metadata_path)->slurp); }
-        or $self->log_fatal(["Error reading metadata file: $@"]);
-
-    return $id_map;
-}
-
 # The main sub that the builders run
 sub build_ia {
     my $queue = shift;
@@ -229,7 +195,7 @@ sub build_ia {
 	# the heap from it and save having to pass certain globals in.
     my $h = $poe_kernel->get_active_session->get_heap;
     my $s = $h->{self};
-    my ($id_map, $ia_type, $tmpdir) = ($s->id_map, $s->ia_type, $h->{tmpdir});
+    my ($ia_type, $tmpdir) = ($s->ia_type, $h->{tmpdir});
 
     #warn 'This builder has ', scalar(@$queue), " instant answers to process\n";
 
@@ -258,15 +224,10 @@ sub build_ia {
         my @js;
     
         #my $t0 = [gettimeofday];
-        if(my $iax = $id_map->{$ia_name}) {
-            my $f = build_metadata($ia_name, $iax, $get_temp_file);
+        # We add metadata for goodies in ZCI::Core::Base
+        if($ia_type ne 'goodie'){
+            my $f = build_metadata($ia_name, $get_temp_file);
             push @js, $f;
-        }
-        else{
-            # Missing metadata is a warning for now. We probably should skip it but
-            # AutoModuleShareDirs adds an entry in Makefile.PL for every directory
-            # by default
-            warn "WARNING - No metadata found for $ia_name";
         }
         #my $t1 = tv_interval($t0, [gettimeofday]);
         #$md_build_time += $t1;
@@ -311,13 +272,14 @@ sub build_ia {
 sub build_metadata {
     my ($fn, $iax, $get_temp_file) = @_;
 
+    my $meta = DDG::Meta::Data->get_ia(id => $fn);
     # create a metadata object for the front end
     my %ia;
     for my $m (qw(id name attribution description topic)){
-        unless(exists $iax->{$m}){
+        unless(exists $meta->{$m}){
             fatal_error("missing value for $m");
         }
-        $ia{$m} = $iax->{$m};
+        $ia{$m} = $meta->{$m};
     }
     $ia{url} = 'https://duck.co/ia/view/' . $ia{id};
 
