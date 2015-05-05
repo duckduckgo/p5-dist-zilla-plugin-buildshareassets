@@ -7,7 +7,6 @@ with 'Dist::Zilla::Role::FileGatherer';
 
 use Dist::Zilla::File::OnDisk;
 
-use DDG::Meta::Data;
 use Time::HiRes qw(tv_interval gettimeofday);
 use File::Temp qw(tempdir tempfile);
 use List::MoreUtils 'part';
@@ -224,11 +223,6 @@ sub build_ia {
         my @js;
     
         #my $t0 = [gettimeofday];
-        # We add metadata for goodies in ZCI::Core::Base
-        if($ia_type ne 'goodie'){
-            my $f = build_metadata($ia_name, $get_temp_file);
-            push @js, $f;
-        }
         #my $t1 = tv_interval($t0, [gettimeofday]);
         #$md_build_time += $t1;
         #warn "\tMetatadata build for $ia_name took ${t1}s\n";
@@ -267,27 +261,6 @@ sub build_ia {
     #    "\tmetadata total buildtime: ${md_build_time}s\n",
     #    "\thandlebars total buildtime: ${hb_build_time}s\n",
     #    "\tjavascript total buildtime: ${js_build_time}s\n";
-}
-
-sub build_metadata {
-    my ($fn, $iax, $get_temp_file) = @_;
-
-    my $meta = DDG::Meta::Data->get_ia(id => $fn);
-    # create a metadata object for the front end
-    my %ia;
-    for my $m (qw(id name attribution description topic)){
-        unless(exists $meta->{$m}){
-            fatal_error("missing value for $m");
-        }
-        $ia{$m} = $meta->{$m};
-    }
-    $ia{url} = 'https://duck.co/ia/view/' . $ia{id};
-
-    my $metadata = eval{ encode_json(\%ia) } or fatal_error("Failed to encode json: $@");
-    my ($fh, $metatmp) = @{ $get_temp_file->() };
-    print $fh ";DDH.$fn = DDH.$fn || {};\nDDH.$fn.meta = $metadata;";
-
-    return $metatmp;
 }
 
 sub build_handlebars {
