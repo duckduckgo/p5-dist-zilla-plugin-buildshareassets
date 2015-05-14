@@ -328,15 +328,11 @@ Performs the following steps in a zeroclickinfo-* repository:
 
 Locates directories in share/ containing F<*.js> or F<*.handlebars> files
 
-=item 2 
-
-Builds metadata json for instant answer
-
-=item 3
+=item 2
 
 Compiles handlebars files, if any
 
-=item 4
+=item 3
 
 Concatenates above files and I<[ia_name].js>, if it exists,
 into I<[ia_name].[ia_type].js>.
@@ -357,10 +353,6 @@ To activate the plugin, add the following to F<dist.ini>:
 =head2 concurrent_builds
 
 The number of concurrent builders to spawn (default: 2)
-
-=head2 metadata_path
-
-Path to the metadata.json file (default: share/{ia_type}/meta/metadata.json)
 
 =head2 exclude
 
