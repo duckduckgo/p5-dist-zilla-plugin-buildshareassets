@@ -25,22 +25,10 @@ has concurrent_builds => (
     default => 2 
 );
 
-has metadata_path => (
-    is => 'rw',
-    default => 'share/{ia_type}/meta/metadata.json'
-);
-
-has id_map => (
-    is => 'ro',
-    lazy => 1,
-    builder => 'load_metadata'
-);
-
 # The instant answer type we're processing. When set it will also set the
 # metadata_path
 has ia_type => (
     is => 'rw',
-    trigger => \&_init_metadata_path
 );
 
 # Instant answers we don't want to build. Space-separated string
@@ -48,20 +36,6 @@ has exclude => (
     is   => 'ro',
     default => 'spice_template' 
 );
-
-sub _init_metadata_path {
-    my ($self, $new) = @_;
-    
-    my $mp = $self->metadata_path;
-    
-    # If metadata_path was set externally, this will fail
-    if($mp =~ s/{ia_type}/$new/){
-        $self->metadata_path($mp);
-    }
-
-    # Let's check that it exists now
-    $self->log_fatal(['Metadata path %s does not exists!', $mp]) unless -f $mp;
-}
 
 # The required plugin sub
 sub gather_files {
@@ -212,15 +186,6 @@ sub _default {
     $h->{self}->log_debug(["We don't explicitly handle event", $e]);
 }
 
-sub load_metadata {
-    my $self = shift;
-
-    my $id_map = eval { decode_json(io($self->metadata_path)->slurp); }
-        or $self->log_fatal(["Error reading metadata file: $@"]);
-
-    return $id_map;
-}
-
 # The main sub that the builders run
 sub build_ia {
     my $queue = shift;
@@ -229,7 +194,7 @@ sub build_ia {
 	# the heap from it and save having to pass certain globals in.
     my $h = $poe_kernel->get_active_session->get_heap;
     my $s = $h->{self};
-    my ($id_map, $ia_type, $tmpdir) = ($s->id_map, $s->ia_type, $h->{tmpdir});
+    my ($ia_type, $tmpdir) = ($s->ia_type, $h->{tmpdir});
 
     #warn 'This builder has ', scalar(@$queue), " instant answers to process\n";
 
@@ -258,16 +223,6 @@ sub build_ia {
         my @js;
     
         #my $t0 = [gettimeofday];
-        if(my $iax = $id_map->{$ia_name}) {
-            my $f = build_metadata($ia_name, $iax, $get_temp_file);
-            push @js, $f;
-        }
-        else{
-            # Missing metadata is a warning for now. We probably should skip it but
-            # AutoModuleShareDirs adds an entry in Makefile.PL for every directory
-            # by default
-            warn "WARNING - No metadata found for $ia_name";
-        }
         #my $t1 = tv_interval($t0, [gettimeofday]);
         #$md_build_time += $t1;
         #warn "\tMetatadata build for $ia_name took ${t1}s\n";
@@ -306,26 +261,6 @@ sub build_ia {
     #    "\tmetadata total buildtime: ${md_build_time}s\n",
     #    "\thandlebars total buildtime: ${hb_build_time}s\n",
     #    "\tjavascript total buildtime: ${js_build_time}s\n";
-}
-
-sub build_metadata {
-    my ($fn, $iax, $get_temp_file) = @_;
-
-    # create a metadata object for the front end
-    my %ia;
-    for my $m (qw(id name attribution description topic)){
-        unless(exists $iax->{$m}){
-            fatal_error("missing value for $m");
-        }
-        $ia{$m} = $iax->{$m};
-    }
-    $ia{url} = 'https://duck.co/ia/view/' . $ia{id};
-
-    my $metadata = eval{ encode_json(\%ia) } or fatal_error("Failed to encode json: $@");
-    my ($fh, $metatmp) = @{ $get_temp_file->() };
-    print $fh ";DDH.$fn = DDH.$fn || {};\nDDH.$fn.meta = $metadata;";
-
-    return $metatmp;
 }
 
 sub build_handlebars {
@@ -393,15 +328,11 @@ Performs the following steps in a zeroclickinfo-* repository:
 
 Locates directories in share/ containing F<*.js> or F<*.handlebars> files
 
-=item 2 
-
-Builds metadata json for instant answer
-
-=item 3
+=item 2
 
 Compiles handlebars files, if any
 
-=item 4
+=item 3
 
 Concatenates above files and I<[ia_name].js>, if it exists,
 into I<[ia_name].[ia_type].js>.
@@ -422,10 +353,6 @@ To activate the plugin, add the following to F<dist.ini>:
 =head2 concurrent_builds
 
 The number of concurrent builders to spawn (default: 2)
-
-=head2 metadata_path
-
-Path to the metadata.json file (default: share/{ia_type}/meta/metadata.json)
 
 =head2 exclude
 
