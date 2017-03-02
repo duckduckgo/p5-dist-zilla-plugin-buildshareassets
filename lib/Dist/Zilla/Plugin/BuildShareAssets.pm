@@ -210,7 +210,7 @@ sub build_ia {
         my $get_temp_file = sub {
             my ($fh, $path);
             eval {
-                ($fh, $path) = tempfile("${ia_name}XXXX", $tmpdir);
+                ($fh, $path) = tempfile("${ia_name}XXXX", DIR => $tmpdir);
             } or
             do {
                 fatal_error("Failed to create temp file: $@\n");
